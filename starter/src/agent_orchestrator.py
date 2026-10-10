@@ -359,42 +359,42 @@ def build_policy_agent() -> Agent:
     PARALLEL, each querying its own Knowledge Base. The coordinator synthesizes
     the combined results into a complete, grounded policy answer.
     """
-    from bedrock_kb_retrieval import retrieve_from_knowledge_base
+    from bedrock_kb_retrieval import retrieve_from_knowledge_base, format_kb_results
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     @tool
     def retrieve_returns_policy(query: str) -> str:
         """Retrieve relevant passages from the Returns Policy knowledge base."""
-        return retrieve_from_knowledge_base(query, config.RETURNS_KB_ID)
+        return format_kb_results(retrieve_from_knowledge_base(config.RETURNS_KB_ID, query))
 
     returns_retriever = Agent(
         name="ReturnsPolicyRetrieverAgent",
         model=BedrockModel(model_id=config.WORKER_MODEL_ID, temperature=0.0),
-        system_prompt="Retrieve returns policy information.",
+        system_prompt="Retrieve returns policy information using retrieve_returns_policy and summarize the relevant facts.",
         tools=[retrieve_returns_policy]
     )
 
     @tool
     def retrieve_shipping_policy(query: str) -> str:
         """Retrieve relevant passages from the Shipping Policy knowledge base."""
-        return retrieve_from_knowledge_base(query, config.SHIPPING_KB_ID)
+        return format_kb_results(retrieve_from_knowledge_base(config.SHIPPING_KB_ID, query))
 
     shipping_retriever = Agent(
         name="ShippingPolicyRetrieverAgent",
         model=BedrockModel(model_id=config.WORKER_MODEL_ID, temperature=0.0),
-        system_prompt="Retrieve shipping policy information.",
+        system_prompt="Retrieve shipping policy information using retrieve_shipping_policy and summarize the relevant facts.",
         tools=[retrieve_shipping_policy]
     )
 
     @tool
     def retrieve_warranty_policy(query: str) -> str:
         """Retrieve relevant passages from the Warranty Policy knowledge base."""
-        return retrieve_from_knowledge_base(query, config.WARRANTY_KB_ID)
+        return format_kb_results(retrieve_from_knowledge_base(config.WARRANTY_KB_ID, query))
 
     warranty_retriever = Agent(
         name="WarrantyPolicyRetrieverAgent",
         model=BedrockModel(model_id=config.WORKER_MODEL_ID, temperature=0.0),
-        system_prompt="Retrieve warranty policy information.",
+        system_prompt="Retrieve warranty policy information using retrieve_warranty_policy and summarize the relevant facts.",
         tools=[retrieve_warranty_policy]
     )
 
@@ -740,22 +740,23 @@ def create_guardrail() -> tuple[str, str]:
             ]
         },
         topicPolicyConfig={
+            'tierConfig': {'tierName': 'STANDARD'},
             'topicsConfig': [
                 {
                     'name': 'CompetitorProducts',
-                    'definition': 'Mentions of competitor products.',
+                    'definition': 'Mentions of competitor products or brands.',
                     'examples': ['Do you sell iPhones?', 'What about Samsung?'],
                     'type': 'DENY'
                 },
                 {
                     'name': 'PricingNegotiations',
-                    'definition': 'Haggling or changing an advertised price. Excludes arithmetic using an already-specified price and discount.',
-                    'examples': ['Can I get a discount?', 'Make it .'],
+                    'definition': 'Haggling or negotiating to change an advertised price. Excludes arithmetic calculations using an already-specified price and discount percentage.',
+                    'examples': ['Can you lower the price for me?', 'Make it $50 instead.'],
                     'type': 'DENY'
                 },
                 {
                     'name': 'LegalThreats',
-                    'definition': 'Threatening legal action.',
+                    'definition': 'Threatening legal action or lawsuits.',
                     'examples': ['I will sue you.', 'My lawyer will contact you.'],
                     'type': 'DENY'
                 }
@@ -763,6 +764,9 @@ def create_guardrail() -> tuple[str, str]:
         },
         wordPolicyConfig={
             'managedWordListsConfig': [{'type': 'PROFANITY'}]
+        },
+        crossRegionConfig={
+            'guardrailProfileIdentifier': 'us.guardrail.v1:0'
         },
         blockedInputMessaging="Blocked input by guardrail.",
         blockedOutputsMessaging="Blocked output by guardrail."
@@ -789,8 +793,13 @@ def deploy_to_agentcore_runtime(
 
     agentcore_cli.stage_runtime_code()
     agentcore_cli.configure_runtime(
+        network_mode='PUBLIC',
+        protocol='HTTP',
         execution_role_arn=config.AGENTCORE_ROLE_ARN,
         env_vars={
+            'AWS_REGION': config.AWS_REGION,
+            'PROJECT_NAME': config.PROJECT_NAME,
+            'AGENT_LOG_GROUP': config.AGENT_LOG_GROUP,
             'GUARDRAIL_ID': guardrail_id,
             'GUARDRAIL_VERSION': guardrail_version,
             'RETURNS_KB_ID': config.RETURNS_KB_ID,
@@ -861,18 +870,23 @@ def configure_observability(runtime_arn: str) -> None:
                           sampling percentage; runtime env AGENT_TRACING_ENABLED /
                           AGENT_TRACE_SAMPLING_RATE
     """
-    # TODO: Build the logging configuration
-    # logging_configuration = {
-    #     'cloudWatchConfig': {'logGroupName': config.AGENT_LOG_GROUP,
-    #                          'logLevel': 'INFO', 'enabled': True},
-    #     'xRayConfig':       {'enabled': True, 'samplingRate': 1.0},
-    # }
-    # Then apply it:  summary = apply_observability_config(runtime_arn, logging_configuration)
-    # Wrap the call in try/except - on success print the CloudWatch log group
-    # and the X-Ray sampling rate; on exception print
-    #   "[Note] Observability configuration failed: <e>"
-
-    pass
+    logging_configuration = {
+        'cloudWatchConfig': {
+            'logGroupName': config.AGENT_LOG_GROUP,
+            'logLevel': 'INFO',
+            'enabled': True,
+        },
+        'xRayConfig': {
+            'enabled': True,
+            'samplingRate': 1.0,
+        },
+    }
+    try:
+        summary = apply_observability_config(runtime_arn, logging_configuration)
+        print(f"  CloudWatch Log Group: {summary.get('log_group')} (INFO)")
+        print(f"  X-Ray Sampling Rate : {logging_configuration['xRayConfig']['samplingRate'] * 100:.0f}%")
+    except Exception as e:
+        print(f"  [Note] Observability configuration failed: {e}")
 
 
 # ═══════════════════════════════════════════════════════
